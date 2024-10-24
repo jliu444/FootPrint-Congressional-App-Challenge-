@@ -5,7 +5,7 @@ const cors = require('cors');
 const app = express();
 const port = process.env.PORT || 5000;
 
-const mongoUri = 'mongodb+srv://User:<Password>@cluster0.5gapp.mongodb.net/';  // For MongoDB Atlas
+const mongoUri = 'mongodb+srv://User:<Password>@cluster0.5gapp.mongodb.net/';  // username and password hidden
 
 mongoose.connect(mongoUri)
     .then(() => console.log('Connected to MongoDB'))
