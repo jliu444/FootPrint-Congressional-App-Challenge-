@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FootPrint</title>
+    <link rel="icon" type="logo.png" href="logo.png">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Caudex:ital,wght@0,400;0,700;1,400;1,700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+    
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+
+    <!-- MediaPipe and TensorFlow Scripts -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+</head>
+<body>
+    <img id="logoImg" src="logo.png">
+    <div id="container">
+        <div id="leftSection">
+            <img id="mapImg" src="map.png">
+            <h2>Crime Map</h2>
+            <div id="map"></div>
+            <table id="crimeTable">
+                <thead>
+                    <tr>
+                        <th>Crime Type</th>
+                        <th>Frequency</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <!-- Data will be inserted here dynamically -->
+                </tbody>
+            </table>
+
+            <div id="crimeModal" class="modal">
+                <div class="modal-content">
+                    <span class="close">&times;</span>
+                    <h2>Enter Crime Details</h2>
+                    <form id="crimeForm">
+                        <label for="crimeType">Crime Type:</label><br>
+                        <select id="crimeType" name="crimeType" required>
+                            <option value="">Select Crime Type</option>
+                            <option value="Sex Crime">Sex Crime</option>
+                            <option value="Theft Crime">Theft Crime</option>
+                            <option value="Traffic Offense">Traffic Offense</option>
+                            <option value="Drug Crime">Drug Crime</option>
+                            <option value="Violent Crime">Violent Crime</option>
+                            <option value="Homicide">Homicide</option>
+                            <option value="Other">Other</option>
+                        </select><br><br>
+                        
+                        <label for="description">Description:</label><br>
+                        <textarea id="description" name="description" required></textarea><br><br>
+                        
+                        <label for="date">Date of Crime:</label><br>
+                        <input type="date" id="date" name="date" required><br><br>
+                        
+                        <input type="hidden" id="lat" name="lat">
+                        <input type="hidden" id="lng" name="lng">
+                        
+                        <button type="submit">Save Crime</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+
+        <div id="rightSection">
+            <img id="cameraImg" src="camera.png">
+            <h2>Criminal Detector</h2>
+            <input type="file" id="folderInput" webkitdirectory directory multiple accept="image/*" />
+            <button id="toggleCameraButton">Start Camera</button>
+            <div id="cameraContainer">
+                <video id="videoInput" autoplay playsinline></video>
+                <canvas id="outputCanvas"></canvas>
+                <div id="output"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Leaflet JS and Combined App Script -->
+    <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+    <script src="app.js"></script>
+    <script>
+        const faceMesh = new FaceMesh({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}` });
+        faceMesh.setOptions({ maxNumFaces: 1, refineLandmarks: true, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+
+        const videoElement = document.getElementById('videoInput');
+        const canvasElement = document.getElementById('outputCanvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const outputDiv = document.getElementById('output');
+        const toggleCameraButton = document.getElementById('toggleCameraButton');
+
+        let criminalLandmarks = [];
+        let nonCriminalLandmarks = [];
+        let isTrainingComplete = false;
+        let model;
+        let isCameraOn = false; 
+        let cameraStream;
+
+        async function loadModel() {
+            model = tf.sequential();
+            model.add(tf.layers.lstm({ units: 32, returnSequences: true, inputShape: [null, 68 * 2], kernelInitializer: 'glorotUniform' }));
+            model.add(tf.layers.lstm({ units: 32, returnSequences: false, goBackwards: true, kernelInitializer: 'glorotUniform' }));
+            model.add(tf.layers.dense({ units: 1, activation: 'sigmoid' }));
+
+            model.compile({
+                optimizer: 'adam',
+                loss: 'binaryCrossentropy',
+                metrics: ['accuracy'],
+            });
+        }
+
+        function onResults(results) {
+            if (!isTrainingComplete) return;
+
+            canvasElement.width = videoElement.videoWidth;
+            canvasElement.height = videoElement.videoHeight;
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+            if (results.multiFaceLandmarks) {
+                for (const landmarks of results.multiFaceLandmarks) {
+                    drawConnectors(canvasCtx, landmarks, FACEMESH_TESSELATION, { color: '#C0C0C070', lineWidth: 1 });
+                    drawConnectors(canvasCtx, landmarks, FACEMESH_RIGHT_EYE, { color: '#FF3030' });
+                    drawConnectors(canvasCtx, landmarks, FACEMESH_LEFT_EYE, { color: '#30FF30' });
+                    drawConnectors(canvasCtx, landmarks, FACEMESH_FACE_OVAL, { color: '#E0E0E0' });
+                    drawConnectors(canvasCtx, landmarks, FACEMESH_LIPS, { color: '#E0E0E0' });
+
+                    const liveLandmarks = landmarks.positions;
+                    const isCriminal = classifyUsingLandmarks(liveLandmarks);
+                    outputDiv.textContent = isCriminal ? "Criminal Detected" : "Not Criminal";
+                }
+            }
+        }
+
+        async function initCamera() {
+            if (isCameraOn) {
+                if (cameraStream) {
+                    cameraStream.getTracks().forEach(track => track.stop());
+                    cameraStream = null;
+                }
+                toggleCameraButton.textContent = "Start Camera";
+                isCameraOn = false;
+            } else {
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                    videoElement.srcObject = stream;
+                    cameraStream = stream;
+
+                    videoElement.onloadeddata = () => {
+                        faceMesh.onResults(onResults);
+                        const camera = new Camera(videoElement, {
+                            onFrame: async () => { await faceMesh.send({ image: videoElement }); },
+                            width: 640,
+                            height: 480,
+                        });
+                        camera.start();
+                    };
+
+                    toggleCameraButton.textContent = "Stop Camera";
+                    isCameraOn = true;
+                } catch (error) {
+                    console.error('Error starting the camera:', error);
+                    outputDiv.textContent = 'Error starting the camera.';
+                }
+            }
+        }
+
+        toggleCameraButton.addEventListener('click', initCamera);
+
+        function classifyUsingLandmarks(liveLandmarks) {
+            if (criminalLandmarks.length === 0 && nonCriminalLandmarks.length === 0) return false;
+
+            const criminalDistances = criminalLandmarks.map(targetLandmarks => calculateDistance(targetLandmarks, liveLandmarks));
+            const nonCriminalDistances = nonCriminalLandmarks.map(targetLandmarks => calculateDistance(targetLandmarks, liveLandmarks));
+
+            const minCriminalDistance = Math.min(...criminalDistances);
+            const minNonCriminalDistance = Math.min(...nonCriminalDistances);
+
+            console.log(`Min Criminal Distance: ${minCriminalDistance}, Min Non-Criminal Distance: ${minNonCriminalDistance}`);
+
+            return minCriminalDistance < minNonCriminalDistance;
+        }
+
+        function calculateDistance(landmarks1, landmarks2) {
+            return landmarks1.reduce((acc, landmark, index) => {
+                const dx = landmark.x - landmarks2[index].x;
+                const dy = landmark.y - landmarks2[index].y;
+                return acc + Math.sqrt(dx * dx + dy * dy);
+            }, 0);
+        }
+
+        document.getElementById('folderInput').addEventListener('change', async (event) => {
+            const files = event.target.files;
+            try {
+                for (const file of files) {
+                    if (file.name.includes('Criminal')) {
+                        const img = await fileToImage(file);
+                        const detections = await faceMesh.send({ image: img });
+                        if (detections && detections.multiFaceLandmarks) {
+                            const landmarks = detections.multiFaceLandmarks[0].positions;
+                            criminalLandmarks.push(landmarks);
+                        }
+                    } else if (file.name.includes('nCriminal')) {
+                        const img = await fileToImage(file);
+                        const detections = await faceMesh.send({ image: img });
+                        if (detections && detections.multiFaceLandmarks) {
+                            const landmarks = detections.multiFaceLandmarks[0].positions;
+                            nonCriminalLandmarks.push(landmarks);
+                        }
+                    }
+                }
+                isTrainingComplete = true;
+                outputDiv.textContent = 'Training completed. Ready to detect.';
+                await loadModel();
+            } catch (error) {
+                console.error('Error processing images:', error);
+                outputDiv.textContent = 'Error processing images.';
+            }
+        });
+
+        function fileToImage(file) {
+            return new Promise((resolve, reject) => {
+                const img = new Image();
+                img.src = URL.createObjectURL(file);
+                img.onload = () => resolve(img);
+                img.onerror = reject;
+            });
+        }
+    </script>
+
+</body>
+</html>
+
+
